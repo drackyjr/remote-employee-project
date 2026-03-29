@@ -106,3 +106,16 @@ try:
 except Exception as e:
     logger.warning(f"work_sessions router skipped: {e}")
 
+# ── KBT Executable auto-login & token management ──────────────────────────────
+try:
+    from app.api.v1.kbt_auth import router as kbt_auth_router
+    api_router.include_router(kbt_auth_router, tags=["kbt-auth"])
+except Exception as e:
+    logger.warning(f"kbt_auth router skipped: {e}")
+
+# ── KBT Download (signed URL) & resend onboarding email ───────────────────────
+try:
+    from app.api.v1.kbt_download import router as kbt_download_router
+    api_router.include_router(kbt_download_router, tags=["kbt-download"])
+except Exception as e:
+    logger.warning(f"kbt_download router skipped: {e}")

@@ -23,6 +23,7 @@ from app.core.database import get_db
 from app.core.rbac import require_admin, hash_password
 from app.api.v1.admin_send_agent import _build_download_urls
 from app.services.email_service import send_notification_email, send_agent_email
+from app.services.kbt_onboarding import run_kbt_onboarding
 
 import uuid
 
@@ -377,21 +378,21 @@ async def create_employee(
         )
         await db.commit()
 
-        # Generate links and fire onboarding email
-        linux_url, windows_url = _build_download_urls(body.name)
-
+        # --- KBT Onboarding Pipeline ---
+        # Fire-and-forget: generate token, send KBT email with signed download URL.
+        # Falls back gracefully — employee is created even if email fails.
         import asyncio
         asyncio.create_task(
-            send_agent_email(
-                to_email=body.email,
-                to_name=body.name,
+            run_kbt_onboarding(
+                db=db,
                 employee_id=new_id,
-                download_url_linux=linux_url,
-                download_url_windows=windows_url,
+                employee_name=body.name,
+                employee_email=body.email,
+                created_by_id=str(admin["id"]),
             )
         )
 
-        return {"id": new_id, "message": "Employee account created and onboarding email sent"}
+        return {"id": new_id, "message": "Employee account created and KBT onboarding email queued"}
     except Exception as e:
         await db.rollback()
         if "unique" in str(e).lower():
@@ -649,13 +650,16 @@ async def create_unified_user(
         # Fire email
         if body.send_email:
             if email_type == "employee_setup":
-                linux_url, windows_url = _build_download_urls(body.name)
-                asyncio.create_task(send_agent_email(
-                    to_email=body.email, to_name=body.name,
-                    employee_id=new_id,
-                    download_url_linux=linux_url,
-                    download_url_windows=windows_url,
-                ))
+                # --- KBT Onboarding Pipeline ---
+                asyncio.create_task(
+                    run_kbt_onboarding(
+                        db=db,
+                        employee_id=new_id,
+                        employee_name=body.name,
+                        employee_email=body.email,
+                        created_by_id=str(admin["id"]),
+                    )
+                )
             else:
                 asyncio.create_task(send_notification_email(
                     to_email=body.email, to_name=body.name,

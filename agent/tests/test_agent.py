@@ -567,6 +567,143 @@ class TestTransparency(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 10. KBT Config
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestKBTConfig(unittest.TestCase):
+
+    def test_kbt_config_dir_uses_dot_kbt(self):
+        """Config dir must be ~/.kbt, not ~/.nef."""
+        import kbt_config
+        self.assertTrue(str(kbt_config.CONFIG_DIR).endswith(".kbt"),
+            msg=f"Expected CONFIG_DIR to end with .kbt, got: {kbt_config.CONFIG_DIR}")
+
+    def test_kbt_default_config_has_employee_id(self):
+        """Default config must include employee_id and kbt_token keys."""
+        from kbt_config import get_default_config
+        cfg = get_default_config()
+        self.assertIn("employee_id", cfg)
+        self.assertIn("kbt_token",   cfg)
+
+    def test_kbt_server_url_env_override(self):
+        """KBT_SERVER_URL env var should override server_url."""
+        import kbt_config
+        import importlib
+        original = os.environ.get("KBT_SERVER_URL")
+        try:
+            os.environ["KBT_SERVER_URL"] = "https://kbt.test.example"
+            cfg = kbt_config.get_default_config()
+            cfg = kbt_config._apply_env_overrides(cfg)
+            self.assertEqual(cfg["server_url"], "https://kbt.test.example")
+        finally:
+            if original is None:
+                os.environ.pop("KBT_SERVER_URL", None)
+            else:
+                os.environ["KBT_SERVER_URL"] = original
+
+    def test_validate_config_catches_missing_server_url(self):
+        from kbt_config import validate_config
+        cfg = {"server_url": "", "employee_id": "emp-001"}
+        errors = validate_config(cfg)
+        self.assertTrue(any("server_url" in e for e in errors))
+
+    def test_validate_config_catches_missing_employee_id(self):
+        from kbt_config import validate_config
+        cfg = {"server_url": "https://ok.example", "employee_id": None}
+        errors = validate_config(cfg)
+        self.assertTrue(any("employee_id" in e for e in errors))
+
+    def test_validate_config_passes_valid(self):
+        from kbt_config import validate_config
+        cfg = {"server_url": "https://ok.example", "employee_id": "emp-001"}
+        errors = validate_config(cfg)
+        self.assertEqual(errors, [])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. KBT Auto-Login (mocked)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestKBTAutoLogin(unittest.TestCase):
+
+    def _load_auto_login_fn(self):
+        """Import auto_login from kbt_main without triggering GUI/signal init."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "kbt_main",
+            str(_AGENT_DIR / "kbt_main.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        # kbt_main guards its entry with 'if __name__ == "__main__"'
+        # so exec_module is safe — no GUI or sys.exit is triggered.
+        spec.loader.exec_module(mod)
+        return mod.auto_login
+
+    def test_auto_login_success(self):
+        """A 200 response returns session data dict."""
+        auto_login = self._load_auto_login_fn()
+        identity = {
+            "employee_id": "emp-001",
+            "token":       "raw-token-abc",
+            "api_url":     "http://fake-tbaps.test",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "access_token": "jwt-abc",
+            "employee_id":  "emp-001",
+            "name":         "Test Employee",
+            "email":        "test@tbaps.test",
+        }
+        with patch("requests.post", return_value=mock_resp):
+            result = auto_login(identity, max_retries=1)
+        self.assertEqual(result["access_token"], "jwt-abc")
+
+    def test_auto_login_401_raises_runtime_error(self):
+        """A 401 response raises RuntimeError immediately (no retry)."""
+        auto_login = self._load_auto_login_fn()
+        identity = {
+            "employee_id": "emp-bad",
+            "token":       "invalid-token",
+            "api_url":     "http://fake-tbaps.test",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.json.return_value = {"detail": "Unauthorized or expired KBT client."}
+        with patch("requests.post", return_value=mock_resp):
+            with self.assertRaises(RuntimeError) as ctx:
+                auto_login(identity, max_retries=1)
+        self.assertIn("Unauthorized", str(ctx.exception))
+
+    def test_auto_login_network_failure_raises_connection_error(self):
+        """Repeated network failures raise ConnectionError."""
+        import requests as req_mod
+        auto_login = self._load_auto_login_fn()
+        identity = {
+            "employee_id": "emp-001",
+            "token":       "raw-token",
+            "api_url":     "http://unreachable.test",
+        }
+        with patch("requests.post", side_effect=req_mod.exceptions.ConnectionError("timeout")):
+            with self.assertRaises(ConnectionError):
+                auto_login(identity, max_retries=2)
+
+    def test_load_identity_raises_when_missing(self):
+        """load_identity() raises FileNotFoundError if no file exists."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "kbt_main", str(_AGENT_DIR / "kbt_main.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # Patch all three search paths to non-existent
+        with patch.object(mod, "_BASE_DIR", Path("/tmp/no_such_dir_kbt_test")):
+            with self.assertRaises(FileNotFoundError):
+                mod.load_identity()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -584,12 +721,15 @@ if __name__ == "__main__":
         TestConfig,
         TestWebsitesCollector,
         TestTransparency,
+        # KBT-specific tests
+        TestKBTConfig,
+        TestKBTAutoLogin,
     ]
     for cls in test_classes:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
     print("\n" + "=" * 70)
-    print("  NEF Agent v2 — Full Test Suite")
+    print("  KBT Executable — Full Test Suite (NEF + KBT)")
     print("=" * 70 + "\n")
 
     runner = unittest.TextTestRunner(verbosity=2)
